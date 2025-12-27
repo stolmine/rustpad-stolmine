@@ -1,0 +1,25 @@
+services:
+  scribblr:
+    build: .
+    ports:
+      - "3030:3030"
+    environment:
+      - PORT=3030
+      - SQLITE_URI=sqlite:///data/scribblr.db
+      - EXPIRY_DAYS=365
+      - RUST_LOG=info
+    volumes:
+      - scribblr-data:/data
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - scribblr
+    restart: unless-stopped
+
+volumes:
+  scribblr-data:
