@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use rustpad_server::{database::Database, ServerConfig};
 use serde_json::Value;
 use warp::{filters::BoxedFilter, test::WsClient, Reply};
 
@@ -41,4 +42,14 @@ pub async fn expect_text(filter: &BoxedFilter<(impl Reply + 'static,)>, id: &str
         .await;
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body(), text);
+}
+
+/// Create a test server configuration with an in-memory SQLite database.
+pub async fn test_config() -> ServerConfig {
+    ServerConfig {
+        expiry_days: 1,
+        database: Database::new("sqlite::memory:")
+            .await
+            .expect("Failed to create test database"),
+    }
 }

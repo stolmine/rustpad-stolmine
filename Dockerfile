@@ -23,7 +23,9 @@ ENV VITE_SHA=${GITHUB_SHA}
 RUN npm run check
 RUN npm run build
 
-FROM scratch
+FROM alpine:latest
+RUN mkdir -p /data && chown 1000:1000 /data
+WORKDIR /app
 COPY --from=frontend /usr/src/app/dist dist
 COPY --from=backend /home/rust/src/target/release/rustpad-server .
 USER 1000:1000

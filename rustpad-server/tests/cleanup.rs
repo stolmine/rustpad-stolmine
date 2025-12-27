@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use common::*;
 use operational_transform::OperationSeq;
-use rustpad_server::{server, ServerConfig};
+use rustpad_server::{database::Database, server, ServerConfig};
 use serde_json::json;
 use tokio::time;
 
@@ -16,7 +16,9 @@ async fn test_cleanup() -> Result<()> {
     pretty_env_logger::try_init().ok();
     let filter = server(ServerConfig {
         expiry_days: 2,
-        ..ServerConfig::default()
+        database: Database::new("sqlite::memory:")
+            .await
+            .expect("Failed to create test database"),
     });
 
     expect_text(&filter, "old", "").await;

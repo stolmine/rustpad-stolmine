@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime};
 use dashmap::DashMap;
 use log::{error, info};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::{self, Instant};
-use warp::{filters::BoxedFilter, ws::Ws, Filter, Rejection, Reply};
+use warp::{filters::BoxedFilter, http::StatusCode, ws::Ws, Filter, Rejection, Reply};
 
 use crate::{database::Database, rustpad::Rustpad};
 
@@ -55,8 +55,8 @@ impl warp::reject::Reject for CustomReject {}
 struct ServerState {
     /// Concurrent map storing in-memory documents.
     documents: Arc<DashMap<String, Document>>,
-    /// Connection to the database pool, if persistence is enabled.
-    database: Option<Database>,
+    /// Connection to the database pool.
+    database: Database,
 }
 
 /// Statistics about the server, returned from an API endpoint.
@@ -70,23 +70,27 @@ struct Stats {
     database_size: usize,
 }
 
+/// Request body for creating a new document.
+#[derive(Deserialize)]
+struct CreateDocumentRequest {
+    name: Option<String>,
+}
+
+/// Request body for renaming a document.
+#[derive(Deserialize)]
+struct RenameDocumentRequest {
+    name: String,
+}
+
 /// Server configuration.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     /// Number of days to clean up documents after inactivity.
     pub expiry_days: u32,
-    /// Database object, for persistence if desired.
-    pub database: Option<Database>,
+    /// Database object for persistence.
+    pub database: Database,
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            expiry_days: 1,
-            database: None,
-        }
-    }
-}
 
 /// A combined filter handling all server routes.
 pub fn server(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
@@ -126,10 +130,37 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .as_secs();
     let stats = warp::path!("stats")
         .and(warp::any().map(move || start_time))
-        .and(state_filter)
+        .and(state_filter.clone())
         .and_then(stats_handler);
 
-    socket.or(text).or(stats).boxed()
+    let list_docs = warp::path!("documents")
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and_then(list_documents_handler);
+
+    let create_doc = warp::path!("documents")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(create_document_handler);
+
+    let get_doc = warp::path!("documents" / String)
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and_then(get_document_handler);
+
+    let rename_doc = warp::path!("documents" / String)
+        .and(warp::patch())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(rename_document_handler);
+
+    let delete_doc = warp::path!("documents" / String)
+        .and(warp::delete())
+        .and(state_filter.clone())
+        .and_then(delete_document_handler);
+
+    socket.or(text).or(stats).or(list_docs).or(create_doc).or(get_doc).or(rename_doc).or(delete_doc).boxed()
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
@@ -139,13 +170,10 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {
-            let rustpad = Arc::new(match &state.database {
-                Some(db) => db.load(&id).await.map(Rustpad::from).unwrap_or_default(),
-                None => Rustpad::default(),
-            });
-            if let Some(db) = &state.database {
-                tokio::spawn(persister(id, Arc::clone(&rustpad), db.clone()));
-            }
+            let rustpad = Arc::new(
+                state.database.load(&id).await.map(Rustpad::from).unwrap_or_default()
+            );
+            tokio::spawn(persister(id.clone(), Arc::clone(&rustpad), state.database.clone()));
             e.insert(Document::new(rustpad))
         }
     };
@@ -161,14 +189,10 @@ async fn text_handler(id: String, state: ServerState) -> Result<impl Reply, Reje
     Ok(match state.documents.get(&id) {
         Some(value) => value.rustpad.text(),
         None => {
-            if let Some(db) = &state.database {
-                db.load(&id)
-                    .await
-                    .map(|document| document.text)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
+            state.database.load(&id)
+                .await
+                .map(|document| document.text)
+                .unwrap_or_default()
         }
     })
 }
@@ -176,18 +200,95 @@ async fn text_handler(id: String, state: ServerState) -> Result<impl Reply, Reje
 /// Handler for the `/api/stats` endpoint.
 async fn stats_handler(start_time: u64, state: ServerState) -> Result<impl Reply, Rejection> {
     let num_documents = state.documents.len();
-    let database_size = match state.database {
-        None => 0,
-        Some(db) => match db.count().await {
-            Ok(size) => size,
-            Err(e) => return Err(warp::reject::custom(CustomReject(e))),
-        },
+    let database_size = match state.database.count().await {
+        Ok(size) => size,
+        Err(e) => return Err(warp::reject::custom(CustomReject(e))),
     };
     Ok(warp::reply::json(&Stats {
         start_time,
         num_documents,
         database_size,
     }))
+}
+
+/// Generate a random document ID.
+fn generate_document_id() -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::thread_rng();
+    (0..6)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
+}
+
+/// Handler for the GET `/api/documents` endpoint.
+async fn list_documents_handler(state: ServerState) -> Result<impl Reply, Rejection> {
+    match state.database.list().await {
+        Ok(documents) => Ok(warp::reply::json(&documents)),
+        Err(e) => {
+            error!("Failed to list documents: {}", e);
+            Err(warp::reject::custom(CustomReject(e)))
+        }
+    }
+}
+
+/// Handler for the POST `/api/documents` endpoint.
+async fn create_document_handler(
+    body: CreateDocumentRequest,
+    state: ServerState,
+) -> Result<impl Reply, Rejection> {
+    let id = generate_document_id();
+    match state.database.create(&id, body.name.as_deref()).await {
+        Ok(meta) => Ok(warp::reply::with_status(
+            warp::reply::json(&meta),
+            StatusCode::CREATED,
+        )),
+        Err(e) => {
+            error!("Failed to create document: {}", e);
+            Err(warp::reject::custom(CustomReject(e)))
+        }
+    }
+}
+
+/// Handler for the GET `/api/documents/{id}` endpoint.
+async fn get_document_handler(id: String, state: ServerState) -> Result<impl Reply, Rejection> {
+    match state.database.get_meta(&id).await {
+        Ok(Some(meta)) => Ok(warp::reply::json(&meta)),
+        Ok(None) => Err(warp::reject::not_found()),
+        Err(e) => {
+            error!("Failed to get document {}: {}", id, e);
+            Err(warp::reject::custom(CustomReject(e)))
+        }
+    }
+}
+
+/// Handler for the PATCH `/api/documents/{id}` endpoint.
+async fn rename_document_handler(
+    id: String,
+    body: RenameDocumentRequest,
+    state: ServerState,
+) -> Result<impl Reply, Rejection> {
+    if let Err(e) = state.database.rename(&id, &body.name).await {
+        error!("Failed to rename document {}: {}", id, e);
+        return Err(warp::reject::custom(CustomReject(e)));
+    }
+    match state.database.get_meta(&id).await {
+        Ok(Some(meta)) => Ok(warp::reply::json(&meta)),
+        Ok(None) => Err(warp::reject::not_found()),
+        Err(e) => Err(warp::reject::custom(CustomReject(e)))
+    }
+}
+
+/// Handler for the DELETE `/api/documents/{id}` endpoint.
+async fn delete_document_handler(id: String, state: ServerState) -> Result<impl Reply, Rejection> {
+    state.documents.remove(&id);
+
+    match state.database.soft_delete(&id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            error!("Failed to delete document {}: {}", id, e);
+            Err(warp::reject::custom(CustomReject(e)))
+        }
+    }
 }
 
 const HOUR: Duration = Duration::from_secs(3600);

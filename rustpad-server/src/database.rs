@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use anyhow::{bail, Result};
+use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqlitePool};
 
 /// Represents a document persisted in database storage.
@@ -12,6 +13,21 @@ pub struct PersistedDocument {
     pub text: String,
     /// Language of the document for editor syntax highlighting.
     pub language: Option<String>,
+}
+
+/// Lightweight document metadata for listing
+#[derive(sqlx::FromRow, Serialize, Clone, Debug)]
+pub struct DocumentMeta {
+    /// Unique document identifier.
+    pub id: String,
+    /// Optional document name.
+    pub name: Option<String>,
+    /// Language of the document for editor syntax highlighting.
+    pub language: Option<String>,
+    /// Timestamp when the document was created.
+    pub created_at: i64,
+    /// Timestamp when the document was last updated.
+    pub updated_at: i64,
 }
 
 /// A driver for database operations wrapping a pool connection.
@@ -47,19 +63,26 @@ impl Database {
 
     /// Store the text of a document in the database.
     pub async fn store(&self, document_id: &str, document: &PersistedDocument) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
         let result = sqlx::query(
             r#"
 INSERT INTO
-    document (id, text, language)
+    document (id, text, language, created_at, updated_at)
 VALUES
-    ($1, $2, $3)
+    ($1, $2, $3, $4, $4)
 ON CONFLICT(id) DO UPDATE SET
     text = excluded.text,
-    language = excluded.language"#,
+    language = excluded.language,
+    updated_at = excluded.updated_at"#,
         )
         .bind(document_id)
         .bind(&document.text)
         .bind(&document.language)
+        .bind(now)
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
@@ -77,5 +100,101 @@ ON CONFLICT(id) DO UPDATE SET
             .fetch_one(&self.pool)
             .await?;
         Ok(row.0 as usize)
+    }
+
+    /// List all non-deleted documents
+    pub async fn list(&self) -> Result<Vec<DocumentMeta>> {
+        sqlx::query_as(
+            r#"SELECT id, name, language, created_at, updated_at
+               FROM document
+               WHERE deleted_at IS NULL
+               ORDER BY updated_at DESC"#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.into())
+    }
+
+    /// Create a new document
+    pub async fn create(&self, id: &str, name: Option<&str>) -> Result<DocumentMeta> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            r#"INSERT INTO document (id, text, name, created_at, updated_at)
+               VALUES ($1, '', $2, $3, $3)"#
+        )
+        .bind(id)
+        .bind(name)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(DocumentMeta {
+            id: id.to_string(),
+            name: name.map(String::from),
+            language: None,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// Get document metadata by ID
+    pub async fn get_meta(&self, id: &str) -> Result<Option<DocumentMeta>> {
+        sqlx::query_as(
+            r#"SELECT id, name, language, created_at, updated_at
+               FROM document WHERE id = $1 AND deleted_at IS NULL"#
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.into())
+    }
+
+    /// Rename a document
+    pub async fn rename(&self, id: &str, name: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            r#"UPDATE document SET name = $2, updated_at = $3
+               WHERE id = $1 AND deleted_at IS NULL"#
+        )
+        .bind(id)
+        .bind(name)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            bail!("Document not found: {}", id);
+        }
+        Ok(())
+    }
+
+    /// Soft delete a document
+    pub async fn soft_delete(&self, id: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            r#"UPDATE document SET deleted_at = $2
+               WHERE id = $1 AND deleted_at IS NULL"#
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            bail!("Document not found or already deleted: {}", id);
+        }
+        Ok(())
     }
 }

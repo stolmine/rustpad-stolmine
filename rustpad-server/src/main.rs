@@ -15,14 +15,11 @@ async fn main() {
             .unwrap_or_else(|_| String::from("1"))
             .parse()
             .expect("Unable to parse EXPIRY_DAYS"),
-        database: match std::env::var("SQLITE_URI") {
-            Ok(uri) => Some(
-                Database::new(&uri)
-                    .await
-                    .expect("Unable to connect to SQLITE_URI"),
-            ),
-            Err(_) => None,
-        },
+        database: Database::new(
+            &std::env::var("SQLITE_URI").expect("SQLITE_URI environment variable is required")
+        )
+        .await
+        .expect("Unable to connect to database"),
     };
 
     warp::serve(server(config)).run(([0, 0, 0, 0], port)).await;

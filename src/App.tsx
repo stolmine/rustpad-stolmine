@@ -5,10 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { VscChevronRight, VscFolderOpened, VscGist } from "react-icons/vsc";
 import useLocalStorageState from "use-local-storage-state";
 
-import rustpadRaw from "../rustpad-server/src/rustpad.rs?raw";
 import DocumentList from "./views/DocumentList";
 import Footer from "./Footer";
-import ReadCodeConfirm from "./ReadCodeConfirm";
 import Sidebar from "./Sidebar";
 import animals from "./animals.json";
 import languages from "./languages.json";
@@ -50,7 +48,6 @@ function App() {
   const rustpad = useRef<Rustpad>();
   const rustpadDocId = useRef<string | null>(null);
   const rustpadEditor = useRef<editor.IStandaloneCodeEditor | null>(null);
-  const [readCodeConfirmOpen, setReadCodeConfirmOpen] = useState(false);
   const id = useHash();
 
   // Effects must be called unconditionally (React hooks rules)
@@ -130,50 +127,6 @@ function App() {
     return <DocumentList />;
   }
 
-  function handleLanguageChange(language: string) {
-    setLanguage(language);
-    if (rustpad.current?.setLanguage(language)) {
-      toast({
-        title: "Language updated",
-        description: (
-          <>
-            All users are now editing in{" "}
-            <Text as="span" fontWeight="semibold">
-              {language}
-            </Text>
-            .
-          </>
-        ),
-        status: "info",
-        duration: 2000,
-        isClosable: true,
-      });
-    }
-  }
-
-  function handleLoadSample(confirmed: boolean) {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      const range = model.getFullModelRange();
-
-      // If there are at least 10 lines of code, ask for confirmation.
-      if (range.endLineNumber >= 10 && !confirmed) {
-        setReadCodeConfirmOpen(true);
-        return;
-      }
-
-      model.pushEditOperations(
-        editor.getSelections(),
-        [{ range, text: rustpadRaw }],
-        () => null,
-      );
-      editor.setPosition({ column: 0, lineNumber: 0 });
-      if (language !== "rust") {
-        handleLanguageChange("rust");
-      }
-    }
-  }
-
   function handleDarkModeChange() {
     setDarkMode(!darkMode);
   }
@@ -201,22 +154,11 @@ function App() {
           documentId={id}
           connection={connection}
           darkMode={darkMode}
-          language={language}
           currentUser={{ name, hue }}
           users={users}
           onDarkModeChange={handleDarkModeChange}
-          onLanguageChange={handleLanguageChange}
-          onLoadSample={() => handleLoadSample(false)}
           onChangeName={(name) => name.length > 0 && setName(name)}
           onChangeColor={() => setHue(generateHue())}
-        />
-        <ReadCodeConfirm
-          isOpen={readCodeConfirmOpen}
-          onClose={() => setReadCodeConfirmOpen(false)}
-          onConfirm={() => {
-            handleLoadSample(true);
-            setReadCodeConfirmOpen(false);
-          }}
         />
 
         <Flex flex={1} minW={0} h="100%" direction="column" overflow="hidden">

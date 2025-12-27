@@ -18,7 +18,7 @@ function Footer() {
         align="center"
       >
         <Icon as={VscRemote} mb={-0.5} mr={1} />
-        <Text fontSize="xs">Rustpad ({version})</Text>
+        <Text fontSize="xs">Scribblr ({version})</Text>
       </Flex>
     </Flex>
   );
