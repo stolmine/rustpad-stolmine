@@ -13,6 +13,7 @@ import languages from "./languages.json";
 import Rustpad, { UserInfo } from "./rustpad";
 import { registerShortcutProvider } from "./shortcutProvider";
 import useHash from "./useHash";
+import { getDocument } from "./api/documents";
 
 function getWsUri(id: string) {
   let url = new URL(`api/socket/${id}`, window.location.href);
@@ -45,6 +46,7 @@ function App() {
   const [darkMode, setDarkMode] = useLocalStorageState("darkMode", {
     defaultValue: false,
   });
+  const [documentTitle, setDocumentTitle] = useState<string | null>(null);
   const rustpad = useRef<Rustpad>();
   const rustpadDocId = useRef<string | null>(null);
   const rustpadEditor = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -122,6 +124,22 @@ function App() {
     }
   }, [connection, name, hue]);
 
+  useEffect(() => {
+    if (!id) {
+      setDocumentTitle(null);
+      return;
+    }
+
+    getDocument(id)
+      .then((doc) => {
+        setDocumentTitle(doc?.name || null);
+      })
+      .catch((error) => {
+        console.error("Failed to fetch document metadata:", error);
+        setDocumentTitle(null);
+      });
+  }, [id]);
+
   // If no hash, show document list
   if (!id) {
     return <DocumentList />;
@@ -175,7 +193,7 @@ function App() {
             <Text>documents</Text>
             <Icon as={VscChevronRight} fontSize="md" />
             <Icon as={VscGist} fontSize="md" color="purple.500" />
-            <Text>{id}</Text>
+            <Text>{documentTitle || id}</Text>
           </HStack>
           <Box flex={1} minH={0}>
             <Editor
