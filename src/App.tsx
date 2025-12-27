@@ -6,12 +6,14 @@ import { VscChevronRight, VscFolderOpened, VscGist } from "react-icons/vsc";
 import useLocalStorageState from "use-local-storage-state";
 
 import rustpadRaw from "../rustpad-server/src/rustpad.rs?raw";
+import DocumentList from "./views/DocumentList";
 import Footer from "./Footer";
 import ReadCodeConfirm from "./ReadCodeConfirm";
 import Sidebar from "./Sidebar";
 import animals from "./animals.json";
 import languages from "./languages.json";
 import Rustpad, { UserInfo } from "./rustpad";
+import { registerShortcutProvider } from "./shortcutProvider";
 import useHash from "./useHash";
 
 function getWsUri(id: string) {
@@ -46,48 +48,87 @@ function App() {
     defaultValue: false,
   });
   const rustpad = useRef<Rustpad>();
+  const rustpadDocId = useRef<string | null>(null);
+  const rustpadEditor = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const [readCodeConfirmOpen, setReadCodeConfirmOpen] = useState(false);
   const id = useHash();
 
-  const [readCodeConfirmOpen, setReadCodeConfirmOpen] = useState(false);
-
+  // Effects must be called unconditionally (React hooks rules)
+  // Note: we intentionally exclude toast/setUsers from deps to prevent reconnection loops
   useEffect(() => {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      model.setValue("");
-      model.setEOL(0); // LF
-      rustpad.current = new Rustpad({
-        uri: getWsUri(id),
-        editor,
-        onConnected: () => setConnection("connected"),
-        onDisconnected: () => setConnection("disconnected"),
-        onDesynchronized: () => {
-          setConnection("desynchronized");
-          toast({
-            title: "Desynchronized with server",
-            description: "Please save your work and refresh the page.",
-            status: "error",
-            duration: null,
-          });
-        },
-        onChangeLanguage: (language) => {
-          if (languages.includes(language)) {
-            setLanguage(language);
-          }
-        },
-        onChangeUsers: setUsers,
-      });
-      return () => {
-        rustpad.current?.dispose();
-        rustpad.current = undefined;
-      };
+    console.log("[Rustpad Effect] id:", id, "editor:", !!editor, "rustpad:", !!rustpad.current, "docId:", rustpadDocId.current);
+
+    if (!id || !editor?.getModel()) {
+      console.log("[Rustpad Effect] Early return - missing id or editor");
+      return;
     }
-  }, [id, editor, toast, setUsers]);
+
+    // If we already have a Rustpad for the same document AND same editor, don't recreate
+    // Must check both: document could be same but editor remounted (navigation)
+    if (rustpad.current && rustpadDocId.current === id && rustpadEditor.current === editor) {
+      console.log("[Rustpad Effect] Skipping - already have Rustpad for this doc and editor");
+      return;
+    }
+
+    // Clean up old Rustpad if switching documents or editor changed
+    if (rustpad.current) {
+      console.log("[Rustpad Effect] Disposing old Rustpad (doc or editor changed)");
+      rustpad.current.dispose();
+      rustpad.current = undefined;
+    }
+
+    console.log("[Rustpad Effect] Creating new Rustpad for:", id);
+    rustpadDocId.current = id;
+    rustpadEditor.current = editor;
+    const model = editor.getModel()!;
+    model.setValue("");
+    model.setEOL(0); // LF
+    rustpad.current = new Rustpad({
+      uri: getWsUri(id),
+      editor,
+      onConnected: () => setConnection("connected"),
+      onDisconnected: () => setConnection("disconnected"),
+      onDesynchronized: () => {
+        setConnection("desynchronized");
+        toast({
+          title: "Desynchronized with server",
+          description: "Please save your work and refresh the page.",
+          status: "error",
+          duration: null,
+        });
+      },
+      onChangeLanguage: (language) => {
+        if (languages.includes(language)) {
+          setLanguage(language);
+        }
+      },
+      onChangeUsers: setUsers,
+    });
+    // No cleanup return - we manage Rustpad lifecycle manually based on document ID
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, editor]);
+
+  // Cleanup on unmount only
+  useEffect(() => {
+    console.log("[Unmount Effect] Mounted");
+    return () => {
+      console.log("[Unmount Effect] CLEANUP - disposing Rustpad");
+      rustpad.current?.dispose();
+      rustpad.current = undefined;
+      rustpadDocId.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (connection === "connected") {
       rustpad.current?.setInfo({ name, hue });
     }
   }, [connection, name, hue]);
+
+  // If no hash, show document list
+  if (!id) {
+    return <DocumentList />;
+  }
 
   function handleLanguageChange(language: string) {
     setLanguage(language);
@@ -153,7 +194,7 @@ function App() {
         fontSize="sm"
         py={0.5}
       >
-        Rustpad
+        Scribblr
       </Box>
       <Flex flex="1 0" minH={0}>
         <Sidebar
@@ -202,7 +243,11 @@ function App() {
                 automaticLayout: true,
                 fontSize: 13,
               }}
-              onMount={(editor) => setEditor(editor)}
+              onMount={(editor, monaco) => {
+                console.log("[Monaco] onMount fired");
+                setEditor(editor);
+                registerShortcutProvider(monaco);
+              }}
             />
           </Box>
         </Flex>
