@@ -43,5 +43,11 @@ export function useDocuments() {
     setDocuments((prev) => prev.filter((d) => d.id !== id));
   }, []);
 
-  return { documents, loading, error, refresh, create, rename, remove };
+  const deleteAll = useCallback(async () => {
+    const result = await api.deleteAllDocuments();
+    setDocuments([]);
+    return result;
+  }, []);
+
+  return { documents, loading, error, refresh, create, rename, remove, deleteAll };
 }

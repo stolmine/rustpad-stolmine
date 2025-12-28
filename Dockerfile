@@ -1,15 +1,42 @@
 FROM rust:alpine AS backend
 WORKDIR /home/rust/src
 RUN apk --no-cache add musl-dev openssl-dev
-COPY . .
-# Tests skipped in Docker build (run separately with: cargo test --release)
-RUN cargo build --release
+
+# Cache dependencies: copy manifests first, build with dummy source
+COPY Cargo.toml Cargo.lock ./
+COPY rustpad-server/Cargo.toml rustpad-server/
+COPY rustpad-wasm/Cargo.toml rustpad-wasm/
+# Migrations needed for sqlx::migrate!() macro at compile time
+COPY rustpad-server/migrations rustpad-server/migrations
+RUN mkdir -p rustpad-server/src rustpad-wasm/src && \
+    echo "fn main() {}" > rustpad-server/src/main.rs && \
+    echo "" > rustpad-wasm/src/lib.rs && \
+    cargo build --release --package rustpad-server && \
+    rm -rf rustpad-server/src rustpad-wasm/src
+
+# Now copy actual source and build (dependencies cached)
+COPY rustpad-server/src rustpad-server/src
+COPY rustpad-wasm/src rustpad-wasm/src
+RUN touch rustpad-server/src/main.rs && cargo build --release --package rustpad-server
 
 FROM --platform=amd64 rust:alpine AS wasm
 WORKDIR /home/rust/src
 RUN apk --no-cache add curl musl-dev
 RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-COPY . .
+
+# Cache dependencies for wasm
+COPY Cargo.toml Cargo.lock ./
+COPY rustpad-server/Cargo.toml rustpad-server/
+COPY rustpad-wasm/Cargo.toml rustpad-wasm/
+RUN mkdir -p rustpad-server/src rustpad-wasm/src && \
+    echo "fn main() {}" > rustpad-server/src/main.rs && \
+    echo "" > rustpad-wasm/src/lib.rs && \
+    cargo build --release --package rustpad-wasm && \
+    rm -rf rustpad-server/src rustpad-wasm/src
+
+# Now copy actual source and build
+COPY rustpad-wasm/src rustpad-wasm/src
+COPY rustpad-server/src rustpad-server/src
 RUN wasm-pack build rustpad-wasm
 
 FROM --platform=amd64 node:lts-alpine AS frontend

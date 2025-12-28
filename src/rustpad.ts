@@ -16,6 +16,7 @@ export type RustpadOptions = {
   readonly onDesynchronized?: () => void;
   readonly onChangeLanguage?: (language: string) => void;
   readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
+  readonly onAuthenticatedEmail?: (email: string | null) => void;
   readonly reconnectInterval?: number;
 };
 
@@ -52,6 +53,17 @@ class Rustpad {
   private lastValue: string = "";
   private ignoreChanges: boolean = false;
   private oldDecorations: string[] = [];
+
+  // Line ownership tracking - maps line number to owner email (or session ID for anonymous)
+  private lineOwnership: Map<number, { owner: string; hue: number }> = new Map();
+  private oldLineDecorations: string[] = [];
+  // Current user's email (for persistent ownership)
+  private myEmail: string | null = null;
+  // Email -> hue color preferences (from server)
+  private emailColors: Map<string, number> = new Map();
+  // Fixed color assignments (overrides dynamic colors when set)
+  private fixedColors: Map<string, number> = new Map();
+  private useFixedColors: boolean = false;
 
   constructor(readonly options: RustpadOptions) {
     this.model = options.editor.getModel()!;
@@ -103,10 +115,91 @@ class Rustpad {
     return this.ws !== undefined;
   }
 
+  /** Set fixed color mode and color assignments. */
+  setFixedColors(enabled: boolean, colors: Record<string, number>) {
+    this.useFixedColors = enabled;
+    this.fixedColors.clear();
+    for (const [email, hue] of Object.entries(colors)) {
+      this.fixedColors.set(email, hue);
+    }
+    // Refresh all line decorations with new color mode
+    this.refreshAllLineColors();
+  }
+
+  /** Get the effective hue for an email (respects fixed colors mode). */
+  private getHueForEmail(email: string): number {
+    if (this.useFixedColors && this.fixedColors.has(email)) {
+      return this.fixedColors.get(email)!;
+    }
+    return this.emailColors.get(email) ?? generateHueFromEmail(email);
+  }
+
+  /** Refresh all line colors based on current color mode. */
+  private refreshAllLineColors() {
+    let changed = false;
+    for (const [line, lineOwner] of this.lineOwnership) {
+      // Only refresh email-based ownership (not session-based)
+      if (!lineOwner.owner.startsWith("session:")) {
+        const newHue = this.getHueForEmail(lineOwner.owner);
+        if (lineOwner.hue !== newHue) {
+          this.lineOwnership.set(line, { owner: lineOwner.owner, hue: newHue });
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      this.updateLineDecorations();
+    }
+  }
+
   /** Set the user's information. */
   setInfo(info: UserInfo) {
+    const hueChanged = this.myInfo && this.myInfo.hue !== info.hue;
     this.myInfo = info;
     this.sendInfo();
+
+    // If hue changed, update colors
+    if (hueChanged) {
+      if (this.myEmail) {
+        // Authenticated user: send color to server for persistence
+        this.sendColor(info.hue);
+      } else {
+        // Anonymous user: just update local line colors
+        const myOwner = `session:${this.me}`;
+        this.updateOwnerHue(myOwner, info.hue);
+      }
+    }
+  }
+
+  /** Send color preference to server (for authenticated users). */
+  private sendColor(hue: number) {
+    console.log("[Rustpad] sendColor:", { hue, myEmail: this.myEmail, lineCount: this.lineOwnership.size });
+    if (this.myEmail) {
+      // Update local cache immediately for responsiveness
+      this.emailColors.set(this.myEmail, hue);
+      console.log("[Rustpad] Calling updateOwnerHue for:", this.myEmail);
+      this.updateOwnerHue(this.myEmail, hue);
+    }
+    this.ws?.send(`{"SetColor":${hue}}`);
+  }
+
+  /** Update the hue for all lines owned by a specific owner. */
+  private updateOwnerHue(ownerKey: string, newHue: number) {
+    let changed = false;
+    let matchCount = 0;
+    console.log("[Rustpad] updateOwnerHue:", { ownerKey, newHue, totalLines: this.lineOwnership.size });
+    for (const [line, lineOwner] of this.lineOwnership) {
+      console.log("[Rustpad] Line", line, "owner:", lineOwner.owner, "vs", ownerKey, "match:", lineOwner.owner === ownerKey);
+      if (lineOwner.owner === ownerKey && lineOwner.hue !== newHue) {
+        this.lineOwnership.set(line, { owner: ownerKey, hue: newHue });
+        changed = true;
+        matchCount++;
+      }
+    }
+    console.log("[Rustpad] updateOwnerHue result:", { changed, matchCount });
+    if (changed) {
+      this.updateLineDecorations();
+    }
   }
 
   /**
@@ -160,6 +253,9 @@ class Rustpad {
   private handleMessage(msg: ServerMsg) {
     if (msg.Identity !== undefined) {
       this.me = msg.Identity;
+    } else if (msg.AuthenticatedEmail !== undefined) {
+      this.myEmail = msg.AuthenticatedEmail;
+      this.options.onAuthenticatedEmail?.(msg.AuthenticatedEmail);
     } else if (msg.History !== undefined) {
       const { start, operations } = msg.History;
       if (start > this.revision) {
@@ -168,13 +264,13 @@ class Rustpad {
         return;
       }
       for (let i = this.revision - start; i < operations.length; i++) {
-        let { id, operation } = operations[i];
+        let { id, operation, email } = operations[i];
         this.revision++;
         if (id === this.me) {
           this.serverAck();
         } else {
           operation = OpSeq.from_str(JSON.stringify(operation));
-          this.applyServer(operation);
+          this.applyServer(operation, id, email);
         }
       }
     } else if (msg.Language !== undefined) {
@@ -182,9 +278,16 @@ class Rustpad {
     } else if (msg.UserInfo !== undefined) {
       const { id, info } = msg.UserInfo;
       if (id !== this.me) {
+        const oldInfo = this.users[id];
         this.users = { ...this.users };
         if (info) {
           this.users[id] = info;
+          // Update line ownership colors for session-based lines (anonymous users)
+          // Lines tracked by email use email-derived colors and don't need updating
+          const expectedHue = oldInfo?.hue ?? generateHueFromId(id);
+          if (expectedHue !== info.hue) {
+            this.updateOwnerHue(`session:${id}`, info.hue);
+          }
         } else {
           delete this.users[id];
           delete this.userCursors[id];
@@ -197,6 +300,14 @@ class Rustpad {
       if (id !== this.me) {
         this.userCursors[id] = data;
         this.updateCursors();
+      }
+    } else if (msg.UserColor !== undefined) {
+      const { email, hue } = msg.UserColor;
+      const oldHue = this.emailColors.get(email);
+      this.emailColors.set(email, hue);
+      // Update line colors for this email if hue changed
+      if (oldHue !== hue) {
+        this.updateOwnerHue(email, hue);
       }
     }
   }
@@ -213,7 +324,7 @@ class Rustpad {
     }
   }
 
-  private applyServer(operation: OpSeq) {
+  private applyServer(operation: OpSeq, userId: number, email?: string) {
     if (this.outstanding) {
       const pair = this.outstanding.transform(operation)!;
       this.outstanding = pair.first();
@@ -224,7 +335,20 @@ class Rustpad {
         operation = pair.second();
       }
     }
+
+    // Analyze operation BEFORE applying to get correct line positions
+    const { affectedLines, lineShifts } = this.analyzeOperation(operation);
+
     this.applyOperation(operation);
+
+    // Update line ownership - use email for persistent ownership, fall back to ID
+    if (affectedLines.size > 0) {
+      const owner = email ?? `session:${userId}`;
+      const userHue = email
+        ? this.getHueForEmail(email)
+        : (this.users[userId]?.hue ?? generateHueFromId(userId));
+      this.updateLineOwnership(affectedLines, owner, userHue, lineShifts);
+    }
   }
 
   private applyClient(operation: OpSeq) {
@@ -381,11 +505,177 @@ class Rustpad {
     );
   }
 
+  /** Update line decorations based on ownership. */
+  private updateLineDecorations() {
+    const decorations: editor.IModelDeltaDecoration[] = [];
+    const lineCount = this.model.getLineCount();
+
+    for (const [lineNumber, owner] of this.lineOwnership) {
+      // Skip if line no longer exists
+      if (lineNumber < 1 || lineNumber > lineCount) continue;
+
+      // Skip blank lines
+      const lineContent = this.model.getLineContent(lineNumber);
+      if (lineContent.trim().length === 0) continue;
+
+      generateLineForegroundStyles(owner.hue);
+
+      decorations.push({
+        range: {
+          startLineNumber: lineNumber,
+          startColumn: 1,
+          endLineNumber: lineNumber,
+          endColumn: lineContent.length + 1,
+        },
+        options: {
+          inlineClassName: `line-owner-text-${owner.hue}`,
+          stickiness: 1,
+        },
+      });
+    }
+
+    this.oldLineDecorations = this.model.deltaDecorations(
+      this.oldLineDecorations,
+      decorations,
+    );
+  }
+
+  /**
+   * Update line ownership based on affected lines.
+   * Also adjusts existing ownership when lines are inserted/deleted.
+   */
+  private updateLineOwnership(
+    affectedLines: Set<number>,
+    owner: string,
+    ownerHue: number,
+    lineShifts: Array<{ fromLine: number; delta: number }>
+  ) {
+    // Apply line shifts (from insertions/deletions) to existing ownership
+    // Process shifts in reverse order to avoid conflicts
+    lineShifts.sort((a, b) => b.fromLine - a.fromLine);
+
+    for (const shift of lineShifts) {
+      if (shift.delta === 0) continue;
+
+      const newOwnership = new Map<number, { owner: string; hue: number }>();
+      for (const [line, lineOwner] of this.lineOwnership) {
+        if (line < shift.fromLine) {
+          newOwnership.set(line, lineOwner);
+        } else if (shift.delta > 0) {
+          // Lines inserted: shift down
+          newOwnership.set(line + shift.delta, lineOwner);
+        } else {
+          // Lines deleted: shift up (if line still exists)
+          const newLine = line + shift.delta;
+          if (newLine >= shift.fromLine) {
+            newOwnership.set(newLine, lineOwner);
+          }
+          // Lines in the deleted range are removed
+        }
+      }
+      this.lineOwnership = newOwnership;
+    }
+
+    // Set ownership for affected lines (skip blank lines)
+    for (const line of affectedLines) {
+      if (line >= 1 && line <= this.model.getLineCount()) {
+        const lineContent = this.model.getLineContent(line);
+        if (lineContent.trim().length > 0) {
+          this.lineOwnership.set(line, { owner, hue: ownerHue });
+        } else {
+          // Remove ownership from blank lines
+          this.lineOwnership.delete(line);
+        }
+      }
+    }
+
+    this.updateLineDecorations();
+  }
+
+  /**
+   * Analyze an operation to determine which lines are affected and any line shifts.
+   * Returns affected line numbers and shift information.
+   */
+  private analyzeOperation(operation: OpSeq): {
+    affectedLines: Set<number>;
+    lineShifts: Array<{ fromLine: number; delta: number }>;
+  } {
+    const affectedLines = new Set<number>();
+    const lineShifts: Array<{ fromLine: number; delta: number }> = [];
+
+    const ops: (string | number)[] = JSON.parse(operation.to_string());
+    let index = 0;
+    const content = this.model.getValue();
+
+    for (const op of ops) {
+      if (typeof op === "string") {
+        // Insert operation
+        const pos = this.model.getPositionAt(this.unicodeToUtf16Offset(content, index));
+        const startLine = pos.lineNumber;
+
+        // Count newlines in inserted text
+        const newlineCount = (op.match(/\n/g) || []).length;
+
+        // Mark all affected lines (from start to start + newlines)
+        for (let i = 0; i <= newlineCount; i++) {
+          affectedLines.add(startLine + i);
+        }
+
+        // Record line shift if newlines were inserted
+        if (newlineCount > 0) {
+          lineShifts.push({ fromLine: startLine + 1, delta: newlineCount });
+        }
+
+        index += unicodeLength(op);
+      } else if (op >= 0) {
+        // Retain
+        index += op;
+      } else {
+        // Delete operation
+        const chars = -op;
+        const fromPos = this.model.getPositionAt(this.unicodeToUtf16Offset(content, index));
+        const toPos = this.model.getPositionAt(this.unicodeToUtf16Offset(content, index + chars));
+
+        const startLine = fromPos.lineNumber;
+        const endLine = toPos.lineNumber;
+
+        // The line where deletion starts is affected
+        affectedLines.add(startLine);
+
+        // Count deleted lines
+        const deletedLines = endLine - startLine;
+        if (deletedLines > 0) {
+          lineShifts.push({ fromLine: startLine + 1, delta: -deletedLines });
+        }
+      }
+    }
+
+    return { affectedLines, lineShifts };
+  }
+
+  /**
+   * Convert unicode offset to UTF-16 offset for model.getPositionAt().
+   */
+  private unicodeToUtf16Offset(content: string, unicodeOffset: number): number {
+    let utf16Offset = 0;
+    let count = 0;
+    for (const c of content) {
+      if (count >= unicodeOffset) break;
+      utf16Offset += c.length;
+      count++;
+    }
+    return utf16Offset;
+  }
+
   private onChange(event: editor.IModelContentChangedEvent) {
     if (!this.ignoreChanges) {
       const content = this.lastValue;
       const contentLength = unicodeLength(content);
       let offset = 0;
+
+      // Track affected lines and line shifts for ownership
+      const affectedLines = new Set<number>();
+      const lineShifts: Array<{ fromLine: number; delta: number }> = [];
 
       let operation = OpSeq.new();
       operation.retain(contentLength);
@@ -408,9 +698,41 @@ class Rustpad {
         changeOp.retain(restLength);
         operation = operation.compose(changeOp)!;
         offset += changeOp.target_len() - changeOp.base_len();
+
+        // Track line ownership changes from this change
+        // Use the range from the change event (already in line/column format)
+        const startLine = change.range.startLineNumber;
+        const endLine = change.range.endLineNumber;
+        const deletedLines = endLine - startLine;
+        const insertedNewlines = (text.match(/\n/g) || []).length;
+
+        // Mark the start line as affected
+        affectedLines.add(startLine);
+
+        // If text was inserted with newlines, mark those new lines too
+        for (let i = 1; i <= insertedNewlines; i++) {
+          affectedLines.add(startLine + i);
+        }
+
+        // Track line shifts
+        const lineDelta = insertedNewlines - deletedLines;
+        if (lineDelta !== 0) {
+          lineShifts.push({ fromLine: startLine + 1, delta: lineDelta });
+        }
       }
+
       this.applyClient(operation);
       this.lastValue = this.model.getValue();
+
+      // Update line ownership for current user - use email for persistence
+      if (this.myInfo && affectedLines.size > 0) {
+        const myOwner = this.myEmail ?? `session:${this.me}`;
+        const myHue = this.myEmail
+          ? this.getHueForEmail(this.myEmail)
+          : this.myInfo.hue;
+        console.log("[Rustpad] onChange storing lines:", { myOwner, myHue, myEmail: this.myEmail, useFixedColors: this.useFixedColors, lines: Array.from(affectedLines) });
+        this.updateLineOwnership(affectedLines, myOwner, myHue, lineShifts);
+      }
     }
   }
 
@@ -431,6 +753,7 @@ class Rustpad {
 type UserOperation = {
   id: number;
   operation: any;
+  email?: string;
 };
 
 type CursorData = {
@@ -440,6 +763,7 @@ type CursorData = {
 
 type ServerMsg = {
   Identity?: number;
+  AuthenticatedEmail?: string | null;
   History?: {
     start: number;
     operations: UserOperation[];
@@ -452,6 +776,10 @@ type ServerMsg = {
   UserCursor?: {
     id: number;
     data: CursorData;
+  };
+  UserColor?: {
+    email: string;
+    hue: number;
   };
 };
 
@@ -483,6 +811,21 @@ function unicodePosition(model: editor.ITextModel, offset: number): IPosition {
   return model.getPositionAt(offsetUTF16);
 }
 
+/**
+ * Generate a consistent hue (0-360) from an email string.
+ * Uses a simple hash function to ensure the same email always produces the same color.
+ */
+export function generateHueFromEmail(email: string): number {
+  let hash = 0;
+  for (let i = 0; i < email.length; i++) {
+    const char = email.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  // Ensure positive value and map to 0-360 range
+  return Math.abs(hash) % 360;
+}
+
 /** Cache for private use by `generateCssStyles()`. */
 const generatedStyles = new Set<number>();
 
@@ -503,6 +846,36 @@ function generateCssStyles(hue: number) {
     element.appendChild(text);
     document.head.appendChild(element);
   }
+}
+
+/** Cache for private use by `generateLineForegroundStyles()`. */
+const generatedLineStyles = new Set<number>();
+
+/** Add CSS styles for line ownership foreground text coloring. */
+function generateLineForegroundStyles(hue: number) {
+  if (!generatedLineStyles.has(hue)) {
+    generatedLineStyles.add(hue);
+    // Use text foreground colors that work in both light and dark modes
+    const css = `
+      .monaco-editor .line-owner-text-${hue} {
+        color: hsl(${hue}, 70%, 35%) !important;
+      }
+      .monaco-editor.vs-dark .line-owner-text-${hue},
+      .monaco-editor.hc-black .line-owner-text-${hue} {
+        color: hsl(${hue}, 70%, 65%) !important;
+      }
+    `;
+    const element = document.createElement("style");
+    const text = document.createTextNode(css);
+    element.appendChild(text);
+    document.head.appendChild(element);
+  }
+}
+
+/** Generate a consistent hue from a user ID (for users without info). */
+function generateHueFromId(id: number): number {
+  // Use golden ratio to spread hues evenly
+  return Math.floor((id * 137.508) % 360);
 }
 
 export default Rustpad;

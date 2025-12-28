@@ -5,6 +5,7 @@ import {
   Flex,
   Heading,
   Icon,
+  IconButton,
   Input,
   InputGroup,
   InputLeftElement,
@@ -13,8 +14,10 @@ import {
   Switch,
   Text,
   useDisclosure,
+  useToast,
 } from "@chakra-ui/react";
 import { useState } from "react";
+import { FaBomb } from "react-icons/fa";
 import { VscAdd, VscSearch } from "react-icons/vsc";
 import useLocalStorageState from "use-local-storage-state";
 
@@ -22,6 +25,7 @@ import type { DocumentMeta } from "../api/documents";
 import CreateNoteModal from "../components/CreateNoteModal";
 import DeleteConfirmModal from "../components/DeleteConfirmModal";
 import DocumentItem from "../components/DocumentItem";
+import KablammoModal from "../components/KablammoModal";
 import { useDocuments } from "../hooks/useDocuments";
 
 function DocumentList() {
@@ -29,10 +33,12 @@ function DocumentList() {
     defaultValue: false,
   });
   const [search, setSearch] = useState("");
-  const { documents, loading, create, rename, remove } = useDocuments();
+  const { documents, loading, create, rename, remove, deleteAll } = useDocuments();
   const createModal = useDisclosure();
   const deleteModal = useDisclosure();
+  const kablammoModal = useDisclosure();
   const [deleteTarget, setDeleteTarget] = useState<DocumentMeta | null>(null);
+  const toast = useToast();
 
   const filteredDocs = documents.filter(
     (doc) =>
@@ -56,6 +62,17 @@ function DocumentList() {
       deleteModal.onClose();
       setDeleteTarget(null);
     }
+  };
+
+  const confirmKablammo = async () => {
+    await deleteAll();
+    kablammoModal.onClose();
+    toast({
+      title: "All notes have been deleted",
+      status: "success",
+      duration: 3000,
+      isClosable: true,
+    });
   };
 
   return (
@@ -108,6 +125,14 @@ function DocumentList() {
             >
               New Note
             </Button>
+            <IconButton
+              aria-label="Delete all notes"
+              icon={<Icon as={FaBomb} />}
+              colorScheme="red"
+              variant="ghost"
+              size="sm"
+              onClick={kablammoModal.onOpen}
+            />
           </Flex>
         </Flex>
 
@@ -172,6 +197,13 @@ function DocumentList() {
         onClose={deleteModal.onClose}
         onConfirm={confirmDelete}
         documentName={deleteTarget?.name || deleteTarget?.id || ""}
+        darkMode={darkMode}
+      />
+
+      <KablammoModal
+        isOpen={kablammoModal.isOpen}
+        onClose={kablammoModal.onClose}
+        onConfirm={confirmKablammo}
         darkMode={darkMode}
       />
     </Flex>

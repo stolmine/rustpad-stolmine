@@ -1,4 +1,4 @@
-import { Box, Flex, HStack, Icon, Text, useToast } from "@chakra-ui/react";
+import { Box, Flex, HStack, Icon, Text, useToast, Switch, FormControl, FormLabel } from "@chakra-ui/react";
 import Editor from "@monaco-editor/react";
 import { editor } from "monaco-editor/esm/vs/editor/editor.api";
 import { useEffect, useRef, useState } from "react";
@@ -10,8 +10,9 @@ import Footer from "./Footer";
 import Sidebar from "./Sidebar";
 import animals from "./animals.json";
 import languages from "./languages.json";
-import Rustpad, { UserInfo } from "./rustpad";
+import Rustpad, { UserInfo, generateHueFromEmail } from "./rustpad";
 import { registerShortcutProvider } from "./shortcutProvider";
+import { registerNoteLanguage, getNoteTheme } from "./noteLanguage";
 import useHash from "./useHash";
 import { getDocument } from "./api/documents";
 
@@ -20,6 +21,12 @@ function getWsUri(id: string) {
   url.protocol = url.protocol == "https:" ? "wss:" : "ws:";
   return url.href;
 }
+
+// Fixed color assignments for specific users (hue values)
+const FIXED_COLORS: Record<string, number> = {
+  "brammyers@gmail.com": 120,    // Green
+  "jamie.nanni@gmail.com": 30,   // Orange
+};
 
 function generateName() {
   return "Anonymous " + animals[Math.floor(Math.random() * animals.length)];
@@ -31,7 +38,7 @@ function generateHue() {
 
 function App() {
   const toast = useToast();
-  const [language, setLanguage] = useState("plaintext");
+  const [language, setLanguage] = useState("note");
   const [connection, setConnection] = useState<
     "connected" | "disconnected" | "desynchronized"
   >("disconnected");
@@ -42,15 +49,44 @@ function App() {
   const [hue, setHue] = useLocalStorageState("hue", {
     defaultValue: generateHue,
   });
+  // Store color overrides per email (so authenticated users can customize their color)
+  const [colorOverrides, setColorOverrides] = useLocalStorageState<Record<string, number>>("colorOverrides", {
+    defaultValue: {},
+  });
   const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
   const [darkMode, setDarkMode] = useLocalStorageState("darkMode", {
     defaultValue: false,
   });
+  const [useFixedColors, setUseFixedColors] = useLocalStorageState("useFixedColors", {
+    defaultValue: false,
+  });
   const [documentTitle, setDocumentTitle] = useState<string | null>(null);
+  // Cloudflare Access authenticated email (null = not authenticated or local dev)
+  const [authenticatedEmail, setAuthenticatedEmail] = useState<string | null>(null);
   const rustpad = useRef<Rustpad>();
   const rustpadDocId = useRef<string | null>(null);
   const rustpadEditor = useRef<editor.IStandaloneCodeEditor | null>(null);
   const id = useHash();
+
+  // Compute the display name and hue based on authentication status
+  // When authenticated via Cloudflare Access, use email as name
+  // For hue: check fixed colors first (if enabled), then user override, then email-derived, then anonymous
+  const displayName = authenticatedEmail || name;
+  const displayHue = authenticatedEmail
+    ? (useFixedColors && FIXED_COLORS[authenticatedEmail] !== undefined
+        ? FIXED_COLORS[authenticatedEmail]
+        : (colorOverrides[authenticatedEmail] ?? generateHueFromEmail(authenticatedEmail)))
+    : hue;
+  const isAuthenticated = authenticatedEmail !== null;
+
+  // Handler for changing color - stores override for authenticated users
+  const handleChangeColor = (newHue: number) => {
+    if (authenticatedEmail) {
+      setColorOverrides({ ...colorOverrides, [authenticatedEmail]: newHue });
+    } else {
+      setHue(newHue);
+    }
+  };
 
   // Effects must be called unconditionally (React hooks rules)
   // Note: we intentionally exclude toast/setUsers from deps to prevent reconnection loops
@@ -102,6 +138,7 @@ function App() {
         }
       },
       onChangeUsers: setUsers,
+      onAuthenticatedEmail: setAuthenticatedEmail,
     });
     // No cleanup return - we manage Rustpad lifecycle manually based on document ID
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -120,9 +157,10 @@ function App() {
 
   useEffect(() => {
     if (connection === "connected") {
-      rustpad.current?.setInfo({ name, hue });
+      rustpad.current?.setFixedColors(useFixedColors, FIXED_COLORS);
+      rustpad.current?.setInfo({ name: displayName, hue: displayHue });
     }
-  }, [connection, name, hue]);
+  }, [connection, displayName, displayHue, useFixedColors]);
 
   useEffect(() => {
     if (!id) {
@@ -172,11 +210,14 @@ function App() {
           documentId={id}
           connection={connection}
           darkMode={darkMode}
-          currentUser={{ name, hue }}
+          currentUser={{ name: displayName, hue: displayHue }}
           users={users}
+          isAuthenticated={isAuthenticated}
+          useFixedColors={useFixedColors}
           onDarkModeChange={handleDarkModeChange}
           onChangeName={(name) => name.length > 0 && setName(name)}
-          onChangeColor={() => setHue(generateHue())}
+          onChangeColor={handleChangeColor}
+          onFixedColorsChange={() => setUseFixedColors(!useFixedColors)}
         />
 
         <Flex flex={1} minW={0} h="100%" direction="column" overflow="hidden">
@@ -197,7 +238,7 @@ function App() {
           </HStack>
           <Box flex={1} minH={0}>
             <Editor
-              theme={darkMode ? "vs-dark" : "vs"}
+              theme={language === "note" ? getNoteTheme(darkMode) : (darkMode ? "vs-dark" : "vs")}
               language={language}
               options={{
                 automaticLayout: true,
@@ -207,6 +248,7 @@ function App() {
                 console.log("[Monaco] onMount fired");
                 setEditor(editor);
                 registerShortcutProvider(monaco);
+                registerNoteLanguage(monaco);
               }}
             />
           </Box>

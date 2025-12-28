@@ -23,9 +23,12 @@ export type SidebarProps = {
   darkMode: boolean;
   currentUser: UserInfo;
   users: Record<number, UserInfo>;
+  isAuthenticated?: boolean;
+  useFixedColors?: boolean;
   onDarkModeChange: () => void;
   onChangeName: (name: string) => void;
-  onChangeColor: () => void;
+  onChangeColor: (hue: number) => void;
+  onFixedColorsChange?: () => void;
 };
 
 function Sidebar({
@@ -34,9 +37,12 @@ function Sidebar({
   darkMode,
   currentUser,
   users,
+  isAuthenticated = false,
+  useFixedColors = false,
   onDarkModeChange,
   onChangeName,
   onChangeColor,
+  onFixedColorsChange,
 }: SidebarProps) {
   const toast = useToast();
 
@@ -84,6 +90,11 @@ function Sidebar({
         <Switch isChecked={darkMode} onChange={onDarkModeChange} />
       </Flex>
 
+      <Flex justifyContent="space-between" mt={2} mb={1.5} w="full">
+        <Heading size="sm">Fixed Colors</Heading>
+        <Switch isChecked={useFixedColors} onChange={onFixedColorsChange} />
+      </Flex>
+
       <Heading mt={4} mb={1.5} size="sm">
         Share Link
       </Heading>
@@ -117,6 +128,7 @@ function Sidebar({
         <User
           info={currentUser}
           isMe
+          isAuthenticated={isAuthenticated}
           onChangeName={onChangeName}
           onChangeColor={onChangeColor}
           darkMode={darkMode}

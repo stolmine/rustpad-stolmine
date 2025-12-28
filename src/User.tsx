@@ -1,6 +1,7 @@
 import {
-  Button,
+  Box,
   ButtonGroup,
+  Button,
   HStack,
   Icon,
   Input,
@@ -12,11 +13,14 @@ import {
   PopoverFooter,
   PopoverHeader,
   PopoverTrigger,
+  Slider,
+  SliderFilledTrack,
+  SliderThumb,
+  SliderTrack,
   Text,
   useDisclosure,
 } from "@chakra-ui/react";
 import { useRef } from "react";
-import { FaPalette } from "react-icons/fa";
 import { VscAccount } from "react-icons/vsc";
 
 import { UserInfo } from "./rustpad";
@@ -24,14 +28,16 @@ import { UserInfo } from "./rustpad";
 type UserProps = {
   info: UserInfo;
   isMe?: boolean;
+  isAuthenticated?: boolean;
   onChangeName?: (name: string) => void;
-  onChangeColor?: () => void;
+  onChangeColor?: (hue: number) => void;
   darkMode: boolean;
 };
 
 function User({
   info,
   isMe = false,
+  isAuthenticated = false,
   onChangeName,
   onChangeColor,
   darkMode,
@@ -40,6 +46,9 @@ function User({
   const { isOpen, onOpen, onClose } = useDisclosure();
 
   const nameColor = `hsl(${info.hue}, 90%, ${darkMode ? "70%" : "25%"})`;
+
+  // For authenticated users: show name (non-editable) but allow color change
+  // For anonymous users: allow both name and color change
   return (
     <Popover
       placement="right"
@@ -52,8 +61,8 @@ function User({
           p={2}
           rounded="md"
           _hover={{
-            bgColor: darkMode ? "#464647" : "gray.200",
-            cursor: "pointer",
+            bgColor: isMe ? (darkMode ? "#464647" : "gray.200") : undefined,
+            cursor: isMe ? "pointer" : undefined,
           }}
           onClick={() => isMe && onOpen()}
         >
@@ -72,27 +81,51 @@ function User({
           fontWeight="semibold"
           borderColor={darkMode ? "#464647" : "gray.200"}
         >
-          Update Info
+          {isAuthenticated ? "Change Color" : "Update Info"}
         </PopoverHeader>
         <PopoverArrow bgColor={darkMode ? "#333333" : "white"} />
         <PopoverCloseButton />
         <PopoverBody borderColor={darkMode ? "#464647" : "gray.200"}>
-          <Input
-            ref={inputRef}
+          {!isAuthenticated && (
+            <Input
+              ref={inputRef}
+              mb={2}
+              value={info.name}
+              maxLength={25}
+              onChange={(event) => onChangeName?.(event.target.value)}
+            />
+          )}
+          <Text fontSize="sm" mb={1}>Color</Text>
+          <Box
+            h="24px"
             mb={2}
-            value={info.name}
-            maxLength={25}
-            onChange={(event) => onChangeName?.(event.target.value)}
+            borderRadius="md"
+            bg={`linear-gradient(to right,
+              hsl(0, 70%, 50%),
+              hsl(60, 70%, 50%),
+              hsl(120, 70%, 50%),
+              hsl(180, 70%, 50%),
+              hsl(240, 70%, 50%),
+              hsl(300, 70%, 50%),
+              hsl(360, 70%, 50%))`}
           />
-          <Button
-            size="sm"
-            w="100%"
-            leftIcon={<FaPalette />}
-            colorScheme={darkMode ? "whiteAlpha" : "gray"}
-            onClick={onChangeColor}
+          <Slider
+            aria-label="color-hue"
+            min={0}
+            max={360}
+            value={info.hue}
+            onChange={(val) => onChangeColor?.(val)}
           >
-            Change Color
-          </Button>
+            <SliderTrack bg="transparent">
+              <SliderFilledTrack bg="transparent" />
+            </SliderTrack>
+            <SliderThumb
+              boxSize={5}
+              bg={`hsl(${info.hue}, 70%, 50%)`}
+              border="2px solid white"
+              boxShadow="md"
+            />
+          </Slider>
         </PopoverBody>
         <PopoverFooter
           display="flex"

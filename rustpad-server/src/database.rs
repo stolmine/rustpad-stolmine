@@ -197,4 +197,56 @@ ON CONFLICT(id) DO UPDATE SET
         }
         Ok(())
     }
+
+    /// Soft delete all non-deleted documents
+    pub async fn delete_all_documents(&self) -> Result<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            r#"UPDATE document SET deleted_at = $1
+               WHERE deleted_at IS NULL"#
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Load all user color preferences
+    pub async fn load_user_colors(&self) -> Result<Vec<(String, u32)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"SELECT email, hue FROM user_color"#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|(email, hue)| (email, hue as u32)).collect())
+    }
+
+    /// Save a user's color preference
+    pub async fn save_user_color(&self, email: &str, hue: u32) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            r#"INSERT INTO user_color (email, hue, updated_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(email) DO UPDATE SET
+                   hue = excluded.hue,
+                   updated_at = excluded.updated_at"#
+        )
+        .bind(email)
+        .bind(hue as i64)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
 }

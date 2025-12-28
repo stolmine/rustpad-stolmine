@@ -82,6 +82,18 @@ struct RenameDocumentRequest {
     name: String,
 }
 
+/// Response for user identity endpoint.
+#[derive(Serialize)]
+struct UserIdentityResponse {
+    email: Option<String>,
+}
+
+/// Response for delete all documents endpoint.
+#[derive(Serialize)]
+struct DeleteAllResponse {
+    deleted: u64,
+}
+
 /// Server configuration.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -117,8 +129,16 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
 
     let socket = warp::path!("socket" / String)
         .and(warp::ws())
+        .and(warp::header::optional::<String>("cf-access-authenticated-user-email"))
         .and(state_filter.clone())
         .and_then(socket_handler);
+
+    let user_identity = warp::path!("user-identity")
+        .and(warp::get())
+        .and(warp::header::optional::<String>("cf-access-authenticated-user-email"))
+        .map(|email: Option<String>| {
+            warp::reply::json(&UserIdentityResponse { email })
+        });
 
     let text = warp::path!("text" / String)
         .and(state_filter.clone())
@@ -160,19 +180,32 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
         .and(state_filter.clone())
         .and_then(delete_document_handler);
 
-    socket.or(text).or(stats).or(list_docs).or(create_doc).or(get_doc).or(rename_doc).or(delete_doc).boxed()
+    let delete_all_docs = warp::path!("documents" / "all")
+        .and(warp::delete())
+        .and(state_filter.clone())
+        .and_then(delete_all_documents_handler);
+
+    socket.or(text).or(stats).or(user_identity).or(list_docs).or(create_doc).or(delete_all_docs).or(get_doc).or(rename_doc).or(delete_doc).boxed()
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
-async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl Reply, Rejection> {
+async fn socket_handler(
+    id: String,
+    ws: Ws,
+    cf_email: Option<String>,
+    state: ServerState,
+) -> Result<impl Reply, Rejection> {
     use dashmap::mapref::entry::Entry;
 
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {
-            let rustpad = Arc::new(
-                state.database.load(&id).await.map(Rustpad::from).unwrap_or_default()
-            );
+            let rustpad = Arc::new(match state.database.load(&id).await {
+                Ok(doc) => Rustpad::from_document(doc, state.database.clone()),
+                Err(_) => Rustpad::new(state.database.clone()),
+            });
+            // Load user colors from database
+            rustpad.load_colors().await;
             tokio::spawn(persister(id.clone(), Arc::clone(&rustpad), state.database.clone()));
             e.insert(Document::new(rustpad))
         }
@@ -181,7 +214,7 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
     let value = entry.value_mut();
     value.last_accessed = Instant::now();
     let rustpad = Arc::clone(&value.rustpad);
-    Ok(ws.on_upgrade(|socket| async move { rustpad.on_connection(socket).await }))
+    Ok(ws.on_upgrade(move |socket| async move { rustpad.on_connection(socket, cf_email).await }))
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
@@ -286,6 +319,20 @@ async fn delete_document_handler(id: String, state: ServerState) -> Result<impl 
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
             error!("Failed to delete document {}: {}", id, e);
+            Err(warp::reject::custom(CustomReject(e)))
+        }
+    }
+}
+
+/// Handler for the DELETE `/api/documents/all` endpoint.
+async fn delete_all_documents_handler(state: ServerState) -> Result<impl Reply, Rejection> {
+    // Clear all in-memory documents
+    state.documents.clear();
+
+    match state.database.delete_all_documents().await {
+        Ok(deleted) => Ok(warp::reply::json(&DeleteAllResponse { deleted })),
+        Err(e) => {
+            error!("Failed to delete all documents: {}", e);
             Err(warp::reject::custom(CustomReject(e)))
         }
     }

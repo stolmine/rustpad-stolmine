@@ -8,20 +8,25 @@ Fork of [Rustpad](https://github.com/ekzhang/rustpad) customized as a private co
 |---------|----------|--------|--------|
 | Cloudflare Tunnel | 1 | Easy | Done |
 | Persistence (Default) | 2 | Easy | Done |
-| Cloudflare Access Auth | 3 | Easy | Pending |
+| Cloudflare Access Auth | 3 | Easy | Done |
 | File Browser + CRUD | 4 | High | Done |
 | Shortcuts | 5 | Moderate | Done |
 | Note Title Modal | 6 | Easy | Done |
 | Browser Tab Title | 7 | Easy | Done |
 | Remove Language Selection | 8 | Easy | Done |
 | Remove About/GitHub Link | 9 | Easy | Done |
-| Test Cloudflare Setup | 10 | Moderate | Pending |
+| Test Cloudflare Setup | 10 | Moderate | Done |
 | Fix Duplicate @ Shortcuts | 11 | Easy | Done |
 | Timestamp Format (YYYY/MM/DD 24h) | 12 | Easy | Done |
 | Show Note Title in Editor UI | 13 | Easy | Done |
-| Cloudflare Access User Identity | 14 | Moderate | Pending |
-| Adjustable User Text Color | 15 | Easy | Pending |
-| Custom Syntax Highlighting | 16 | Moderate | Pending |
+| Cloudflare Access User Identity | 14 | Moderate | Done |
+| Adjustable User Text Color | 15 | Easy | Done |
+| Custom Syntax Highlighting | 16 | Moderate | Done |
+| Remove Rustpad from Link Unfurl | 17 | Easy | Done |
+| Delete All Notes (Kablammo) | 18 | Moderate | Done |
+| Editor Line Coloring by User | 19 | High | Done |
+| Persistent Color Preferences | 20 | Moderate | Done |
+| Fixed Colors Toggle | 21 | Easy | Done |
 
 ---
 
@@ -663,6 +668,144 @@ src/
 - [ ] (Optional) Dates/times highlighted subtly
 - [ ] (Optional) URLs clickable or highlighted
 - [ ] Follows existing color mode (dark/light)
+
+---
+
+## 17. Remove Rustpad from Link Unfurl
+
+**Goal**: Update link preview metadata to show "Scribblr" instead of "Rustpad" when sharing links.
+
+### Implementation
+
+**File**: `index.html`
+- Update `<meta property="og:title">` to "Scribblr"
+- Update `<meta property="og:description">` to remove Rustpad references
+- Update `<meta name="description">` similarly
+- Update any `<meta property="og:site_name">` if present
+
+### Acceptance Criteria
+
+- [ ] Link previews show "Scribblr" branding
+- [ ] No "Rustpad" text in unfurled links
+- [ ] Description reflects private notes app purpose
+
+---
+
+## 18. Delete All Notes (Kablammo)
+
+**Goal**: Add a button to delete all notes with a confirmation safeguard.
+
+### Implementation
+
+**UI Location**: Document list page, bomb icon button next to "New Note"
+
+**Modal Flow**:
+1. User clicks bomb icon
+2. Modal appears: "Are you sure you want to end it all?"
+3. User must type `kablammo` in input field to enable confirm button
+4. On confirm: delete all documents (soft delete)
+5. Success toast: "All notes have been deleted"
+
+### Backend
+
+- `DELETE /api/documents/all` - Delete all documents (soft delete)
+- `database.rs`: `delete_all_documents()` method
+
+### Acceptance Criteria
+
+- [ ] Bomb icon visible on document list page
+- [ ] Modal appears on click with warning message
+- [ ] Confirm button disabled until "kablammo" typed
+- [ ] All documents soft-deleted on confirm
+- [ ] Success feedback shown to user
+
+---
+
+## 19. Editor Line Coloring by User
+
+**Goal**: Color editor lines based on which user last edited them.
+
+### Implementation
+
+Track line ownership in rustpad.ts:
+- Maintain map of line number → user info (id, hue)
+- Update ownership when local or remote edits occur
+- Apply Monaco decorations to color line backgrounds
+- Use subtle hsla colors based on user's hue
+
+### Acceptance Criteria
+
+- [ ] Lines show subtle background color based on last editor
+- [ ] Color updates in real-time as edits are made
+- [ ] Works correctly with collaborative editing
+- [ ] Supports light and dark mode
+
+---
+
+## 20. Persistent Color Preferences
+
+**Goal**: Store user color preferences on the server, tied to email, so they persist across sessions.
+
+### Implementation
+
+**Backend**:
+- New database table `user_color` (email, hue, updated_at)
+- `SetColor` WebSocket message to save color preference
+- `UserColor` broadcast message to notify all clients
+- Load colors from database on Rustpad creation
+
+**Frontend**:
+- `emailColors` map to cache server-stored colors
+- `sendColor()` to persist color changes
+- Use stored colors for line ownership coloring
+
+### Acceptance Criteria
+
+- [x] Color preferences stored in SQLite database
+- [x] Colors persist across page reloads
+- [x] Color changes broadcast to all connected clients
+- [x] Line colors update when user changes their color
+
+---
+
+## 21. Fixed Colors Toggle
+
+**Goal**: Allow switching between dynamic user-picked colors and fixed per-user color assignments.
+
+### Implementation
+
+**Fixed color assignments**:
+- `brammyers@gmail.com` → Green (hue 120)
+- `jamie.nanni@gmail.com` → Orange (hue 30)
+
+**UI**: Toggle switch in sidebar "Fixed Colors"
+
+**Frontend**:
+- `useFixedColors` state in localStorage
+- `setFixedColors()` method in Rustpad
+- `getHueForEmail()` respects fixed colors mode
+- Toggle refreshes all line colors immediately
+
+### Acceptance Criteria
+
+- [x] Toggle visible in sidebar
+- [x] Fixed colors override dynamic colors when enabled
+- [x] Both name and line text use fixed colors
+- [x] Setting persists in localStorage
+
+---
+
+## Known Issues
+
+### Second User Color Divergence
+
+**Status**: Investigating
+
+**Symptom**: Second user (jamie.nanni@gmail.com) sees their name in their picked color but their text lines appear in a different color (yellow/email-derived).
+
+**Suspected cause**: Mismatch between owner keys used when storing line ownership vs when updating colors. Debug logging has been added to trace the issue.
+
+**Workaround**: Use "Fixed Colors" toggle to force consistent colors.
 
 ---
 

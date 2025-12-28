@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify};
 use warp::ws::{Message, WebSocket};
 
-use crate::{database::PersistedDocument, ot::transform_index};
+use crate::{database::{Database, PersistedDocument}, ot::transform_index};
 
 /// The main object representing a collaborative session.
 pub struct Rustpad {
@@ -26,6 +26,8 @@ pub struct Rustpad {
     update: broadcast::Sender<ServerMsg>,
     /// Set to true when the document is destroyed.
     killed: AtomicBool,
+    /// Database for persisting user colors.
+    database: Option<Database>,
 }
 
 /// Shared state involving multiple users, protected by a lock.
@@ -36,12 +38,17 @@ struct State {
     language: Option<String>,
     users: HashMap<u64, UserInfo>,
     cursors: HashMap<u64, CursorData>,
+    /// Color preferences by email (for authenticated users).
+    user_colors: HashMap<String, u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UserOperation {
     id: u64,
     operation: OperationSeq,
+    /// The authenticated email of the user who made this edit (for persistent ownership).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,6 +77,8 @@ enum ClientMsg {
     ClientInfo(UserInfo),
     /// Sets the user's cursor and selection positions.
     CursorData(CursorData),
+    /// Sets the authenticated user's color preference.
+    SetColor(u32),
 }
 
 /// A message sent to the client over WebSocket.
@@ -77,6 +86,8 @@ enum ClientMsg {
 enum ServerMsg {
     /// Informs the client of their unique socket ID.
     Identity(u64),
+    /// Informs the client of their authenticated email (from Cloudflare Access).
+    AuthenticatedEmail(Option<String>),
     /// Broadcasts text operations to all clients.
     History {
         start: usize,
@@ -88,6 +99,8 @@ enum ServerMsg {
     UserInfo { id: u64, info: Option<UserInfo> },
     /// Broadcasts a user's cursor position.
     UserCursor { id: u64, data: CursorData },
+    /// Broadcasts an authenticated user's color preference.
+    UserColor { email: String, hue: u32 },
 }
 
 impl From<ServerMsg> for Message {
@@ -106,16 +119,31 @@ impl Default for Rustpad {
             notify: Default::default(),
             update: tx,
             killed: AtomicBool::new(false),
+            database: None,
         }
     }
 }
 
-impl From<PersistedDocument> for Rustpad {
-    fn from(document: PersistedDocument) -> Self {
+impl Rustpad {
+    /// Create a new Rustpad with database support for color persistence.
+    pub fn new(database: Database) -> Self {
+        let (tx, _) = broadcast::channel(16);
+        Self {
+            state: Default::default(),
+            count: Default::default(),
+            notify: Default::default(),
+            update: tx,
+            killed: AtomicBool::new(false),
+            database: Some(database),
+        }
+    }
+
+    /// Create a Rustpad from a persisted document with database support.
+    pub fn from_document(document: PersistedDocument, database: Database) -> Self {
         let mut operation = OperationSeq::default();
         operation.insert(&document.text);
 
-        let rustpad = Self::default();
+        let rustpad = Self::new(database);
         {
             let mut state = rustpad.state.write();
             state.text = document.text;
@@ -123,18 +151,36 @@ impl From<PersistedDocument> for Rustpad {
             state.operations.push(UserOperation {
                 id: u64::MAX,
                 operation,
+                email: None,
             })
         }
         rustpad
+    }
+
+    /// Initialize user colors from database.
+    pub async fn load_colors(&self) {
+        if let Some(ref db) = self.database {
+            match db.load_user_colors().await {
+                Ok(colors) => {
+                    let mut state = self.state.write();
+                    for (email, hue) in colors {
+                        state.user_colors.insert(email, hue);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load user colors: {}", e);
+                }
+            }
+        }
     }
 }
 
 impl Rustpad {
     /// Handle a connection from a WebSocket.
-    pub async fn on_connection(&self, socket: WebSocket) {
+    pub async fn on_connection(&self, socket: WebSocket, cf_email: Option<String>) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
-        info!("connection! id = {}", id);
-        if let Err(e) = self.handle_connection(id, socket).await {
+        info!("connection! id = {}, cf_email = {:?}", id, cf_email);
+        if let Err(e) = self.handle_connection(id, socket, cf_email).await {
             warn!("connection terminated early: {}", e);
         }
         info!("disconnection, id = {}", id);
@@ -177,10 +223,10 @@ impl Rustpad {
         self.killed.load(Ordering::Relaxed)
     }
 
-    async fn handle_connection(&self, id: u64, mut socket: WebSocket) -> Result<()> {
+    async fn handle_connection(&self, id: u64, mut socket: WebSocket, cf_email: Option<String>) -> Result<()> {
         let mut update_rx = self.update.subscribe();
 
-        let mut revision: usize = self.send_initial(id, &mut socket).await?;
+        let mut revision: usize = self.send_initial(id, &mut socket, cf_email.clone()).await?;
 
         loop {
             // In order to avoid the "lost wakeup" problem, we first request a
@@ -203,7 +249,7 @@ impl Rustpad {
                     match result {
                         None => break,
                         Some(message) => {
-                            self.handle_message(id, message?).await?;
+                            self.handle_message(id, message?, cf_email.clone()).await?;
                         }
                     }
                 }
@@ -213,8 +259,9 @@ impl Rustpad {
         Ok(())
     }
 
-    async fn send_initial(&self, id: u64, socket: &mut WebSocket) -> Result<usize> {
+    async fn send_initial(&self, id: u64, socket: &mut WebSocket, cf_email: Option<String>) -> Result<usize> {
         socket.send(ServerMsg::Identity(id).into()).await?;
+        socket.send(ServerMsg::AuthenticatedEmail(cf_email).into()).await?;
         let mut messages = Vec::new();
         let revision = {
             let state = self.state.read();
@@ -237,6 +284,13 @@ impl Rustpad {
                 messages.push(ServerMsg::UserCursor {
                     id,
                     data: data.clone(),
+                });
+            }
+            // Send known user color preferences
+            for (email, &hue) in &state.user_colors {
+                messages.push(ServerMsg::UserColor {
+                    email: email.clone(),
+                    hue,
                 });
             }
             state.operations.len()
@@ -265,7 +319,7 @@ impl Rustpad {
         Ok(start + num_ops)
     }
 
-    async fn handle_message(&self, id: u64, message: Message) -> Result<()> {
+    async fn handle_message(&self, id: u64, message: Message, cf_email: Option<String>) -> Result<()> {
         let msg: ClientMsg = match message.to_str() {
             Ok(text) => serde_json::from_str(text).context("failed to deserialize message")?,
             Err(()) => return Ok(()), // Ignore non-text messages
@@ -275,7 +329,7 @@ impl Rustpad {
                 revision,
                 operation,
             } => {
-                self.apply_edit(id, revision, operation)
+                self.apply_edit(id, revision, operation, cf_email)
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
@@ -296,17 +350,39 @@ impl Rustpad {
                 let msg = ServerMsg::UserCursor { id, data };
                 self.update.send(msg).ok();
             }
+            ClientMsg::SetColor(hue) => {
+                // Only authenticated users can set persistent colors
+                if let Some(ref email) = cf_email {
+                    self.state.write().user_colors.insert(email.clone(), hue);
+                    let msg = ServerMsg::UserColor {
+                        email: email.clone(),
+                        hue,
+                    };
+                    self.update.send(msg).ok();
+                    // Persist to database
+                    if let Some(ref db) = self.database {
+                        let db = db.clone();
+                        let email = email.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = db.save_user_color(&email, hue).await {
+                                warn!("Failed to save user color: {}", e);
+                            }
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn apply_edit(&self, id: u64, revision: usize, mut operation: OperationSeq) -> Result<()> {
+    fn apply_edit(&self, id: u64, revision: usize, mut operation: OperationSeq, email: Option<String>) -> Result<()> {
         info!(
-            "edit: id = {}, revision = {}, base_len = {}, target_len = {}",
+            "edit: id = {}, revision = {}, base_len = {}, target_len = {}, email = {:?}",
             id,
             revision,
             operation.base_len(),
-            operation.target_len()
+            operation.target_len(),
+            email
         );
         let state = self.state.upgradable_read();
         let len = state.operations.len();
@@ -333,7 +409,7 @@ impl Rustpad {
                 *end = transform_index(&operation, *end);
             }
         }
-        state.operations.push(UserOperation { id, operation });
+        state.operations.push(UserOperation { id, operation, email });
         state.text = new_text;
         Ok(())
     }

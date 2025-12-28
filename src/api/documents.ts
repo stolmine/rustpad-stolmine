@@ -57,3 +57,13 @@ export async function deleteDocument(id: string): Promise<void> {
     throw new Error("Failed to delete document");
   }
 }
+
+export async function deleteAllDocuments(): Promise<{ deleted: number }> {
+  const response = await fetch("/api/documents/all", {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to delete all documents");
+  }
+  return response.json();
+}
