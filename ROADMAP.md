@@ -6,20 +6,22 @@ Fork of [Rustpad](https://github.com/ekzhang/rustpad) customized as a private co
 
 | Feature | Priority | Effort | Status |
 |---------|----------|--------|--------|
-| Cloudflare Tunnel | 1 | Easy | Pending |
+| Cloudflare Tunnel | 1 | Easy | Done |
 | Persistence (Default) | 2 | Easy | Done |
 | Cloudflare Access Auth | 3 | Easy | Pending |
 | File Browser + CRUD | 4 | High | Done |
 | Shortcuts | 5 | Moderate | Done |
-| Note Title Modal | 6 | Easy | Pending |
+| Note Title Modal | 6 | Easy | Done |
 | Browser Tab Title | 7 | Easy | Done |
 | Remove Language Selection | 8 | Easy | Done |
 | Remove About/GitHub Link | 9 | Easy | Done |
 | Test Cloudflare Setup | 10 | Moderate | Pending |
 | Fix Duplicate @ Shortcuts | 11 | Easy | Done |
 | Timestamp Format (YYYY/MM/DD 24h) | 12 | Easy | Done |
-| Show Note Title in Editor UI | 13 | Easy | Pending |
+| Show Note Title in Editor UI | 13 | Easy | Done |
 | Cloudflare Access User Identity | 14 | Moderate | Pending |
+| Adjustable User Text Color | 15 | Easy | Pending |
+| Custom Syntax Highlighting | 16 | Moderate | Pending |
 
 ---
 
@@ -589,6 +591,78 @@ src/
 ├── documents            # NEW: List/create
 └── documents/{id}       # NEW: Get/update/delete
 ```
+
+---
+
+## 15. Adjustable User Text Color
+
+**Goal**: Allow users to customize their text/cursor color in the editor.
+
+### Implementation
+
+**File**: `src/Sidebar.tsx` or `src/App.tsx`
+- Add color picker or preset color options
+- Store selected color in localStorage
+- Pass color to Rustpad user info (hue value)
+
+**File**: `src/rustpad.ts`
+- Already supports `hue` in `UserInfo`
+- May need to expand to support full RGB or more hues
+
+### UI Options
+
+1. **Color picker**: Full color selection
+2. **Preset palette**: 8-12 predefined colors
+3. **Hue slider**: Simple slider for hue adjustment
+
+### Acceptance Criteria
+
+- [ ] User can change their text/cursor color
+- [ ] Color persists across sessions (localStorage)
+- [ ] Color visible to collaborators
+- [ ] Follows existing UI patterns
+
+---
+
+## 16. Custom Syntax Highlighting
+
+**Goal**: Disable default code syntax highlighting and optionally add note-relevant highlighting (dates, times, etc.).
+
+### Options
+
+1. **Disable completely**: Set Monaco to plaintext with no tokenization
+2. **Custom highlighting**: Create a custom Monaco language/theme that highlights:
+   - Dates (e.g., `2024/12/27`)
+   - Times (e.g., `14:30`)
+   - URLs
+   - Headings (lines starting with `#`)
+   - Lists (lines starting with `-` or `*`)
+   - Checkboxes (`[ ]` and `[x]`)
+
+### Implementation
+
+**Option 1 - Disable:**
+
+**File**: `src/App.tsx`
+- Set `language="plaintext"` on Monaco Editor (may already be default)
+- Ensure no automatic language detection
+
+**Option 2 - Custom Language:**
+
+**New file**: `src/noteLanguage.ts`
+- Register custom Monaco language `note`
+- Define tokenizer rules for dates, times, URLs, etc.
+
+**File**: `src/App.tsx`
+- Import and register custom language on mount
+- Set `language="note"` on Monaco Editor
+
+### Acceptance Criteria
+
+- [ ] No code syntax highlighting (unless custom)
+- [ ] (Optional) Dates/times highlighted subtly
+- [ ] (Optional) URLs clickable or highlighted
+- [ ] Follows existing color mode (dark/light)
 
 ---
 
