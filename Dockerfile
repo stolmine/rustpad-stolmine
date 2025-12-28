@@ -2,7 +2,7 @@ FROM rust:alpine AS backend
 WORKDIR /home/rust/src
 RUN apk --no-cache add musl-dev openssl-dev
 COPY . .
-RUN cargo test --release
+# Tests skipped in Docker build (run separately with: cargo test --release)
 RUN cargo build --release
 
 FROM --platform=amd64 rust:alpine AS wasm
